@@ -8,9 +8,11 @@ License server for Ludo Titan Bot.
 - GET /admin  -> HTML page with Pause / Resume buttons (for Kaptaan)
 """
 import os
-import sqlite3
 import logging
+from datetime import datetime
 from flask import Flask, request, jsonify, Response, session, redirect, url_for
+from pymongo import MongoClient, ASCENDING
+from pymongo.errors import DuplicateKeyError
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
@@ -26,7 +28,8 @@ def _require_env(name, allow_empty=False):
     return value
 
 
-DB_PATH = _require_env("LICENSE_DB_PATH")
+MONGO_URI = _require_env("MONGO_URI")
+MONGO_DB_NAME = _require_env("MONGO_DB_NAME")
 ADMIN_SECRET = _require_env("ADMIN_SECRET")
 MASTER_LICENSE_KEY = _require_env("MASTER_LICENSE_KEY", allow_empty=True).strip()
 
@@ -49,35 +52,38 @@ logging.getLogger("werkzeug").setLevel(logging.ERROR)
 app.logger.setLevel(logging.INFO)
 
 
-def get_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+client = MongoClient(MONGO_URI)
+db = client[MONGO_DB_NAME]
+licenses_col = db["licenses"]
+settings_col = db["settings"]
+acceptances_col = db["acceptances"]
 
 
 def init_db():
-    with get_db() as conn:
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS licenses (key TEXT PRIMARY KEY, machine_id TEXT, created_at DEFAULT CURRENT_TIMESTAMP)"
-        )
-        conn.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS acceptances (machine_id TEXT PRIMARY KEY, version TEXT, accepted_at DEFAULT CURRENT_TIMESTAMP)"
-        )
-        conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('paused', '0')")
-        conn.commit()
+    settings_col.update_one(
+        {"_id": "paused"},
+        {"$setOnInsert": {"value": "0"}},
+        upsert=True,
+    )
+    licenses_col.create_index([("machine_id", ASCENDING)], unique=True, sparse=True)
+    licenses_col.create_index([("key", ASCENDING)], unique=True, sparse=True)
+    acceptances_col.create_index(
+        [("machine_id", ASCENDING), ("version", ASCENDING)],
+        unique=True,
+    )
 
 
 def is_paused():
-    with get_db() as conn:
-        row = conn.execute("SELECT value FROM settings WHERE key = 'paused'").fetchone()
-        return row and row["value"] == "1"
+    row = settings_col.find_one({"_id": "paused"})
+    return row and str(row.get("value")) == "1"
 
 
 def set_paused(paused):
-    with get_db() as conn:
-        conn.execute("UPDATE settings SET value = ? WHERE key = 'paused'", ("1" if paused else "0",))
-        conn.commit()
+    settings_col.update_one(
+        {"_id": "paused"},
+        {"$set": {"value": "1" if paused else "0"}},
+        upsert=True,
+    )
 
 
 def check_admin():
@@ -100,10 +106,9 @@ def validate():
     if not machine_id:
         return jsonify({"error": "Missing machine_id"}), 403
 
-    with get_db() as conn:
-        row = conn.execute("SELECT machine_id FROM licenses WHERE machine_id = ?", (machine_id,)).fetchone()
-        if not row:
-            return jsonify({"error": "Unauthorized machine_id"}), 403
+    row = licenses_col.find_one({"machine_id": machine_id})
+    if not row:
+        return jsonify({"error": "Unauthorized machine_id"}), 403
 
     return jsonify({"authorized": True, "message": "Machine ID is authorized."}), 200
 
@@ -121,12 +126,31 @@ def add_machine():
         return jsonify({"error": "Missing machine_id"}), 400
 
     try:
-        with get_db() as conn:
-            conn.execute("INSERT INTO licenses (key, machine_id) VALUES (NULL, ?)", (machine_id,))
-            conn.commit()
+        licenses_col.insert_one(
+            {"machine_id": machine_id, "created_at": datetime.utcnow()}
+        )
         return jsonify({"ok": True, "machine_id": machine_id}), 201
-    except sqlite3.IntegrityError:
+    except DuplicateKeyError:
         return jsonify({"error": "Machine ID already exists"}), 409
+
+
+@app.route("/add_key", methods=["POST"])
+def add_key():
+    """Add a new license key. Requires ADMIN_SECRET."""
+    data = request.get_json(silent=True) or {}
+    secret = data.get("secret") or request.form.get("secret")
+    key = (data.get("key") or request.form.get("key") or "").strip()
+
+    if secret != ADMIN_SECRET:
+        return jsonify({"error": "Invalid secret"}), 401
+    if not key:
+        return jsonify({"error": "Missing key"}), 400
+
+    try:
+        licenses_col.insert_one({"key": key, "created_at": datetime.utcnow()})
+        return jsonify({"ok": True, "key": key}), 201
+    except DuplicateKeyError:
+        return jsonify({"error": "Key already exists"}), 409
 
 
 @app.route("/disclaimer/status", methods=["GET"])
@@ -136,11 +160,10 @@ def disclaimer_status():
     if not machine_id:
         return jsonify({"error": "Missing machine_id"}), 400
 
-    with get_db() as conn:
-        row = conn.execute(
-            "SELECT accepted_at FROM acceptances WHERE machine_id = ? AND version = ?",
-            (machine_id, DISCLAIMER_VERSION),
-        ).fetchone()
+    row = acceptances_col.find_one(
+        {"machine_id": machine_id, "version": DISCLAIMER_VERSION},
+        {"accepted_at": 1},
+    )
     return jsonify(
         {
             "accepted": bool(row),
@@ -160,12 +183,11 @@ def disclaimer_accept():
     if not machine_id:
         return jsonify({"error": "Missing machine_id"}), 400
 
-    with get_db() as conn:
-        conn.execute(
-            "INSERT OR REPLACE INTO acceptances (machine_id, version, accepted_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
-            (machine_id, version),
-        )
-        conn.commit()
+    acceptances_col.update_one(
+        {"machine_id": machine_id, "version": version},
+        {"$set": {"accepted_at": datetime.utcnow()}},
+        upsert=True,
+    )
 
     return jsonify({"ok": True, "machine_id": machine_id, "version": version}), 200
 
@@ -193,14 +215,10 @@ def delete_machine():
     if not machine_id:
         return jsonify({"error": "Missing machine_id"}), 400
 
-    with get_db() as conn:
-        cur = conn.execute(
-            "DELETE FROM licenses WHERE machine_id = ? OR key = ?",
-            (machine_id, machine_id),
-        )
-        conn.commit()
-
-    if cur.rowcount == 0:
+    result = licenses_col.delete_one(
+        {"$or": [{"machine_id": machine_id}, {"key": machine_id}]}
+    )
+    if result.deleted_count == 0:
         return jsonify({"error": "Machine ID not found"}), 404
     return jsonify({"ok": True, "deleted": machine_id}), 200
 
@@ -260,23 +278,20 @@ def admin_page():
             if not machine_id:
                 return _admin_page_html(error="Machine ID is required!"), 400
             try:
-                with get_db() as conn:
-                    conn.execute("INSERT INTO licenses (key, machine_id) VALUES (NULL, ?)", (machine_id,))
-                    conn.commit()
+                licenses_col.insert_one(
+                    {"machine_id": machine_id, "created_at": datetime.utcnow()}
+                )
                 return redirect(url_for("admin_page"))
-            except sqlite3.IntegrityError:
+            except DuplicateKeyError:
                 return _admin_page_html(error=f"Machine ID {machine_id} already exists."), 409
         if action == "delete_machine":
             machine_id = (request.form.get("machine_id") or "").strip()
             if not machine_id:
                 return _admin_page_html(error="Machine ID is required!"), 400
-            with get_db() as conn:
-                cur = conn.execute(
-                    "DELETE FROM licenses WHERE machine_id = ? OR key = ?",
-                    (machine_id, machine_id),
-                )
-                conn.commit()
-            if cur.rowcount == 0:
+            result = licenses_col.delete_one(
+                {"$or": [{"machine_id": machine_id}, {"key": machine_id}]}
+            )
+            if result.deleted_count == 0:
                 return _admin_page_html(error=f"Machine ID {machine_id} not found."), 404
             return redirect(url_for("admin_page"))
 
@@ -349,26 +364,32 @@ def _admin_login_html(error=""):
 
 def _admin_page_html(message="", error=""):
     status = "PAUSED" if is_paused() else "Running"
-    with get_db() as conn:
-        rows = conn.execute(
-            """
-            SELECT l.machine_id,
-                   l.created_at,
-                   (SELECT a.accepted_at
-                    FROM acceptances a
-                    WHERE a.machine_id = l.machine_id AND a.version = ?) AS accepted_at
-            FROM licenses l
-            WHERE l.machine_id IS NOT NULL
-            ORDER BY l.created_at DESC
-            """,
-            (DISCLAIMER_VERSION,),
-        ).fetchall()
+    rows = list(
+        licenses_col.find({"machine_id": {"$ne": None}})
+        .sort("created_at", -1)
+    )
+
+    machine_ids = [r.get("machine_id") for r in rows if r.get("machine_id")]
+    accepted_map = {}
+    if machine_ids:
+        for doc in acceptances_col.find(
+            {"version": DISCLAIMER_VERSION, "machine_id": {"$in": machine_ids}},
+            {"machine_id": 1, "accepted_at": 1},
+        ):
+            accepted_map[doc.get("machine_id")] = doc.get("accepted_at")
+
+    def _fmt_dt(value):
+        if not value:
+            return "-"
+        if isinstance(value, datetime):
+            return value.isoformat(sep=" ", timespec="seconds")
+        return str(value)
 
     rows_html = ""
     for row in rows:
-        mid = row["machine_id"]
-        created = row["created_at"]
-        accepted_at = row["accepted_at"]
+        mid = row.get("machine_id")
+        created = _fmt_dt(row.get("created_at"))
+        accepted_at = _fmt_dt(accepted_map.get(mid))
         rows_html += f"""
         <tr>
           <td class="mid">{mid}</td>
