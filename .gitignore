@@ -1,0 +1,23 @@
+# Local license (buyer key) - do not commit
+.ludo_license
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.env
+venv/
+.venv/
+
+# License server DB (if running locally)
+license_server/licenses.db
+licenses.db
+
+# Debug / calibration outputs
+screen_capture.png
+screen_popup_check.png
+debug_cropped_*.png
+
+# OS
+.DS_Store
+Thumbs.db
