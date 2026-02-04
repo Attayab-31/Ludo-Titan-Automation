@@ -9,7 +9,7 @@
 1. Push this repo to GitHub.
 2. On Render, create a new **Web Service** from the repo.
 3. Render will detect `render.yaml` and set everything automatically.
-4. In Render **Environment** settings, fill: `MONGO_URI`, `MONGO_DB_NAME`, `ADMIN_SECRET`, `ADMIN_SESSION_SECRET`, `MASTER_LICENSE_KEY` (can be empty), `PAUSED_MESSAGE`, `DISCLAIMER_TEXT`, `PAYMENT_INSTRUCTIONS`, `PAYMENT_URL` (can be empty).
+4. In Render **Environment** settings, fill: `MONGO_URI`, `MONGO_DB_NAME`, `ADMIN_SECRET`, `ADMIN_SESSION_SECRET`, `MASTER_LICENSE_KEY` (can be empty), `PAUSED_MESSAGE`, `DISCLAIMER_TEXT`, `PAYMENT_INSTRUCTIONS`, `PAYMENT_URL` (can be empty), `HEADER_TEXT` (can be empty).
 
 Notes:
 - You can use MongoDB Atlas (free tier) for persistence.

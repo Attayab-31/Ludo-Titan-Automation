@@ -38,6 +38,7 @@ DISCLAIMER_VERSION = _require_env("DISCLAIMER_VERSION")
 DISCLAIMER_TEXT = _require_env("DISCLAIMER_TEXT", allow_empty=True)
 PAYMENT_INSTRUCTIONS = _require_env("PAYMENT_INSTRUCTIONS")
 PAYMENT_URL = _require_env("PAYMENT_URL", allow_empty=True)
+HEADER_TEXT = _require_env("HEADER_TEXT", allow_empty=True)
 
 # Session secret for admin UI
 app.secret_key = _require_env("ADMIN_SESSION_SECRET")
@@ -199,6 +200,19 @@ def payment_info():
         {
             "instructions": PAYMENT_INSTRUCTIONS,
             "url": PAYMENT_URL,
+        }
+    )
+
+
+@app.route("/ui_header", methods=["GET"])
+def ui_header():
+    """Return banner/header text configured via env."""
+    raw = str(HEADER_TEXT or "")
+    lines = [line for line in raw.replace("\\r", "").split("\\n") if line.strip()]
+    return jsonify(
+        {
+            "text": HEADER_TEXT,
+            "lines": lines,
         }
     )
 
