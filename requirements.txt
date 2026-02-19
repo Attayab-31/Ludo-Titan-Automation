@@ -1,0 +1,6 @@
+pure-python-adb
+easyocr
+opencv-python-headless
+numpy
+Pillow
+torchvision

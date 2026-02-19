@@ -18,6 +18,14 @@ screen_capture.png
 screen_popup_check.png
 debug_cropped_*.png
 
+# Build artifacts / OCR models
+build/
+dist/
+*.spec
+easyocr_models/
+release/
+.vscode/
+
 # OS
 .DS_Store
 Thumbs.db
