@@ -9,7 +9,7 @@ License server for Ludo Titan Bot.
 """
 import os
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from flask import Flask, request, jsonify, Response, session, redirect, url_for
 from pymongo import MongoClient, ASCENDING
 from pymongo.errors import DuplicateKeyError
@@ -19,6 +19,7 @@ from dotenv import load_dotenv
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
 app = Flask(__name__)
+app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(minutes=1)
 def _require_env(name, allow_empty=False):
     value = os.environ.get(name)
     if value is None:
@@ -94,7 +95,22 @@ def check_admin():
 
 
 def is_admin_session():
-    return session.get("admin_logged_in") is True
+    if session.get("admin_logged_in") is not True:
+        return False
+    login_at = session.get("admin_logged_in_at")
+    if not login_at:
+        return False
+    try:
+        login_at = float(login_at)
+    except (TypeError, ValueError):
+        return False
+    lifetime = app.permanent_session_lifetime
+    if lifetime:
+        if datetime.utcnow().timestamp() - login_at > lifetime.total_seconds():
+            session.pop("admin_logged_in", None)
+            session.pop("admin_logged_in_at", None)
+            return False
+    return True
 
 
 @app.route("/validate", methods=["GET"])
@@ -272,6 +288,8 @@ def admin_page():
             if secret != ADMIN_SECRET:
                 return _admin_login_html(error="Invalid admin secret!"), 401
             session["admin_logged_in"] = True
+            session["admin_logged_in_at"] = datetime.utcnow().timestamp()
+            session.permanent = True
             return redirect(url_for("admin_page"))
 
         if action == "logout":
