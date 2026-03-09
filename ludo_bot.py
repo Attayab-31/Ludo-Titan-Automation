@@ -570,11 +570,13 @@ def log(msg, level="info", show_time=True):
         "debug": "[DBG]",
         "note": "[i]",
     }
-    prefix = icons.get(level, "[*]")
+    icon = icons.get(level, "[*]")
+    tag = getattr(LOG_CONTEXT, "tag", "")
+    tag_text = f"[{tag}] " if tag else ""
     if show_time:
-        print(f"  {ts}  {prefix}  {msg}")
+        print(f"  {ts}  {icon}  {tag_text}{msg}")
     else:
-        print(f"  {prefix}  {msg}")
+        print(f"  {icon}  {tag_text}{msg}")
 
 
 def debug(msg):
@@ -728,6 +730,18 @@ def start_restart_listener():
     return stop_event
 
 
+LOG_CONTEXT = threading.local()
+
+
+def set_log_tag(tag):
+    LOG_CONTEXT.tag = tag
+
+
+def clear_log_tag():
+    if hasattr(LOG_CONTEXT, "tag"):
+        del LOG_CONTEXT.tag
+
+
 def resource_path(relative_path):
     """Get absolute path to a bundled resource (PyInstaller) or local file."""
     base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
@@ -827,7 +841,14 @@ def create_ocr_reader():
 
 
 class LudoBot:
-    def __init__(self, device_serial, resolution=None, popup_template_path='popup_template.png', club_code='#bcaf9533'):
+    def __init__(
+        self,
+        device_serial,
+        resolution=None,
+        popup_template_path='popup_template.png',
+        club_code='#bcaf9533',
+        external_stop_event=None,
+    ):
         resolution = resolution or LDPLAYER_RESOLUTION
         self.device_serial = device_serial
         ensure_adb_client()
@@ -836,6 +857,7 @@ class LudoBot:
         self.last_auth_check = 0
         self.stop_requested = False
         self.stop_message = None
+        self.external_stop_event = external_stop_event
         self.connect_device(device_serial)
         self.resolution = resolution
         self.scale_x = resolution[0] / 1080
@@ -1071,6 +1093,10 @@ class LudoBot:
         if restart_requested():
             log("Restart requested by user.", "info", show_time=False)
             raise RestartRequested()
+        if self.external_stop_event and self.external_stop_event.is_set():
+            self.stop_requested = True
+            if not self.stop_message:
+                self.stop_message = "Stopped by user."
         if self.stop_requested:
             print_section("Access paused")
             if self.stop_message:
@@ -1142,6 +1168,267 @@ class LudoBot:
                     if "Search" in search_text:
                         continue
 
+
+def parse_csv_list(value):
+    if not value:
+        return []
+    parts = re.split(r"[,\s]+", value.strip())
+    return [p for p in parts if p]
+
+
+def normalize_club_code(code):
+    if not code:
+        return ""
+    code = code.strip()
+    if not code:
+        return ""
+    if not code.startswith("#"):
+        code = "#" + code
+    return code
+
+
+def prompt_bot_count():
+    while True:
+        print_block(["How many bots do you want to run?"])
+        response = input("  Number of bots (default 1): ").strip()
+        if not response:
+            return 1
+        try:
+            count = int(response)
+        except ValueError:
+            log("Please enter a valid number (e.g., 1, 2, 3).", "error", show_time=False)
+            continue
+        if count < 1:
+            log("Please enter a number greater than 0.", "error", show_time=False)
+            continue
+        return count
+
+
+def prompt_serial(default_serial):
+    while True:
+        print_block(["Enter your ADB PORT shown above. Examples: 5555 or 5556"])
+        serial = input("  ADB port: ").strip()
+        if not serial:
+            serial = default_serial
+        if serial:
+            return serial
+        log("No ADB port provided. Please try again.", "error", show_time=False)
+
+
+def prompt_club():
+    print_section("Target club")
+    print_block(["Enter your TARGETED CLUB CODE."])
+    print_block(["Example: bcaf9533 or #bcaf9533."])
+    while True:
+        club = input("  Club code: ").strip()
+        if club:
+            return normalize_club_code(club)
+        log("No club code provided. Please enter a club code.", "error", show_time=False)
+
+
+class BotWorker:
+    def __init__(self, serial, club, stagger_seconds=0.0):
+        self.serial = serial
+        self.club = club
+        self.stagger_seconds = stagger_seconds
+        self.stop_event = threading.Event()
+        self.thread = None
+        self.status = "stopped"
+        self.last_error = None
+        self._lock = threading.Lock()
+
+    def _set_status(self, status):
+        with self._lock:
+            self.status = status
+
+    def start(self):
+        if self.thread and self.thread.is_alive():
+            return
+        self.stop_event.clear()
+        self._set_status("starting")
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+
+    def request_stop(self):
+        self.stop_event.set()
+
+    def join(self, timeout=None):
+        if self.thread:
+            self.thread.join(timeout=timeout)
+
+    def is_alive(self):
+        return bool(self.thread and self.thread.is_alive())
+
+    def _run(self):
+        set_log_tag(self.serial)
+        try:
+            log(f"Starting bot for device {self.serial}...", "info", show_time=False)
+            bot = LudoBot(
+                self.serial,
+                resolution=LDPLAYER_RESOLUTION,
+                popup_template_path="popup_template.png",
+                club_code=self.club,
+                external_stop_event=self.stop_event,
+            )
+            self._set_status("running")
+            bot.run()
+            self._set_status("stopped")
+        except RestartRequested:
+            self._set_status("restart")
+        except SystemExit:
+            self._set_status("stopped")
+        except Exception:
+            self._set_status("crashed")
+            self.last_error = traceback.format_exc()
+            log("Worker crashed. Details below:", "error", show_time=False)
+            formatted = self.last_error.strip().splitlines()
+            for line in formatted:
+                print(f"  {line}")
+        finally:
+            clear_log_tag()
+
+
+class MultiBotController:
+    def __init__(self, serials, clubs, stagger_seconds=0.0):
+        self.workers = {}
+        self.stagger_seconds = stagger_seconds
+        self.input_lock = threading.Lock()
+        for serial, club in zip(serials, clubs):
+            self.workers[serial] = BotWorker(serial, club, stagger_seconds=stagger_seconds)
+
+    def _find_worker_key(self, serial_input):
+        if serial_input in self.workers:
+            return serial_input
+        port = _port_from_serial(serial_input)
+        if serial_input.isdigit():
+            port = serial_input
+        if port:
+            for key in self.workers:
+                if _port_from_serial(key) == port:
+                    return key
+        return None
+
+    def start_all(self):
+        for i, worker in enumerate(self.workers.values()):
+            worker.start()
+            if self.stagger_seconds and self.stagger_seconds > 0 and i < len(self.workers) - 1:
+                time.sleep(self.stagger_seconds)
+
+    def any_alive(self):
+        return any(worker.is_alive() for worker in self.workers.values())
+
+    def stop_all(self):
+        for worker in self.workers.values():
+            worker.request_stop()
+
+    def join_all(self, timeout=5):
+        for worker in self.workers.values():
+            worker.join(timeout=timeout)
+
+    def stop_bot(self, serial_input):
+        key = self._find_worker_key(serial_input)
+        if not key:
+            log(f"Bot not found for serial/port: {serial_input}", "error", show_time=False)
+            return False
+        worker = self.workers[key]
+        worker.request_stop()
+        log(f"Stop requested for {key}.", "note", show_time=False)
+        return True
+
+    def restart_bot(self, serial_input, new_club):
+        key = self._find_worker_key(serial_input)
+        if not key:
+            log(f"Bot not found for serial/port: {serial_input}", "error", show_time=False)
+            return False
+        worker = self.workers[key]
+        worker.request_stop()
+        worker.join(timeout=10)
+        worker.club = new_club
+        worker.start()
+        log(f"Restarted {key} with club {new_club}.", "ok", show_time=False)
+        return True
+
+    def print_status(self):
+        print_section("Bot status")
+        lines = []
+        for key, worker in self.workers.items():
+            status = worker.status
+            club = worker.club
+            lines.append(f"{key}  [{status}]  club {club}")
+        print_block(lines)
+
+    def control_prompt(self):
+        if not self.input_lock.acquire(False):
+            return
+        try:
+            print_section("Bot control")
+            print_block([
+                "Enter the bot serial/port you want to control.",
+                "Leave club blank to stop only.",
+                "Type 'list' to show all bots.",
+            ])
+            serial_input = input("  Bot serial/port: ").strip()
+            if not serial_input:
+                return
+            if serial_input.lower() in ("list", "l"):
+                self.print_status()
+                return
+            club = input("  New club code (blank = stop): ").strip()
+            if not club:
+                self.stop_bot(serial_input)
+                return
+            club = normalize_club_code(club)
+            self.restart_bot(serial_input, club)
+        finally:
+            self.input_lock.release()
+
+
+def start_multi_control_listener(controller):
+    stop_event = threading.Event()
+
+    def _listen():
+        try:
+            import msvcrt
+        except Exception:
+            return
+        while not stop_event.is_set():
+            if msvcrt.kbhit():
+                ch = msvcrt.getch()
+                if ch in (b"c", b"C"):
+                    controller.control_prompt()
+                elif ch in (b"l", b"L"):
+                    controller.print_status()
+                elif ch in (b"r", b"R"):
+                    request_restart()
+            time.sleep(0.1)
+
+    t = threading.Thread(target=_listen, daemon=True)
+    t.start()
+    return stop_event
+
+
+def run_multi_bots(serials, clubs, stagger_seconds=0.0):
+    controller = MultiBotController(serials, clubs, stagger_seconds=stagger_seconds)
+    controller.start_all()
+    control_stop = start_multi_control_listener(controller)
+
+    try:
+        while controller.any_alive():
+            if restart_requested():
+                break
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        log("Stopping all bots...", "error", show_time=False)
+    finally:
+        controller.stop_all()
+        controller.join_all(timeout=5)
+        if control_stop:
+            control_stop.set()
+
+    if restart_requested():
+        return "restart"
+    return "done"
+
 if __name__ == "__main__":
     try:
         sys.stdout.reconfigure(line_buffering=True)
@@ -1156,6 +1443,9 @@ if __name__ == "__main__":
     parser.add_argument("club_code", nargs="?", default=None, help="Club code to join (e.g. #bcaf9533)")
     parser.add_argument("--club", dest="club_code_opt", default=None, help="Club code (alternative to positional)")
     parser.add_argument("--serial", default=LDPLAYER_ADB_DEFAULT, help=f"ADB device (default: {LDPLAYER_ADB_DEFAULT})")
+    parser.add_argument("--serials", default=None, help="Comma/space-separated ADB devices (multi-device mode)")
+    parser.add_argument("--clubs", default=None, help="Comma/space-separated club codes (one or same count as --serials)")
+    parser.add_argument("--stagger", type=float, default=0.2, help="Delay between starting devices (seconds)")
     parser.add_argument("--verbose", action="store_true", help="Show extra debug logs")
     args = parser.parse_args()
     VERBOSE = args.verbose
@@ -1226,6 +1516,30 @@ if __name__ == "__main__":
     else:
         log("Authorization successful. You can now use the bot.", "ok")
 
+    serials = parse_csv_list(args.serials)
+    if serials:
+        clubs_input = parse_csv_list(args.clubs)
+        default_club = args.club_code_opt or args.club_code
+        if clubs_input:
+            if len(clubs_input) == 1:
+                clubs = clubs_input * len(serials)
+            elif len(clubs_input) == len(serials):
+                clubs = clubs_input
+            else:
+                log("Club list must be 1 entry or match --serials count.", "error", show_time=False)
+                raise SystemExit(1)
+        elif default_club:
+            clubs = [default_club] * len(serials)
+        else:
+            log("Missing club code. Provide --club or --clubs when using --serials.", "error", show_time=False)
+            raise SystemExit(1)
+
+        clubs = [normalize_club_code(c) for c in clubs]
+        log(f"Starting multi-device mode for {len(serials)} devices.", "info", show_time=False)
+        log("Shortcuts: C=control bot, L=list bots, R=restart/stop all.", "note", show_time=False)
+        run_multi_bots(serials, clubs, stagger_seconds=args.stagger)
+        raise SystemExit(0)
+
     while True:
         clear_restart_request()
         flush_key_buffer()
@@ -1288,25 +1602,41 @@ if __name__ == "__main__":
                     print(f"   {name}  [{status}]  port {port_display}")
             else:
                 debug("LDPlayer instances found but no ADB ports detected.")
-    
+
         print()
-        print_block(["Enter your ADB PORT shown above. Examples: 5555 or 5556"])
-        serial = input("  ADB port: ").strip()
-        if not serial:
-            serial = suggested_serial or LDPLAYER_ADB_DEFAULT
+        bot_count = prompt_bot_count()
+        default_serial = suggested_serial or LDPLAYER_ADB_DEFAULT
+
+        if bot_count > 1:
+            serials = []
+            clubs = []
+            for i in range(bot_count):
+                print_section(f"Bot {i + 1}")
+                serial = prompt_serial(default_serial)
+                log(f"Using serial: {serial}", "info", show_time=False)
+                club = prompt_club()
+                serials.append(serial)
+                clubs.append(club)
+
+            print_section("Summary")
+            summary_lines = []
+            for i, (serial, club) in enumerate(zip(serials, clubs), 1):
+                summary_lines.append(f"Bot {i}:  Device {serial}  Club {club}")
+            print_block(summary_lines)
+
+            log("Starting automation. Press Ctrl+C to stop.", "info", show_time=False)
+            log("Shortcuts: C=control bot, L=list bots, R=restart/stop all.", "note", show_time=False)
+            result = run_multi_bots(serials, clubs, stagger_seconds=args.stagger)
+
+            if result == "restart":
+                log("Restarting setup...", "info", show_time=False)
+                continue
+            raise SystemExit(0)
+
+        serial = prompt_serial(default_serial)
         log(f"Using serial: {serial}", "info", show_time=False)
-    
-        print_section("Target club")
-        print_block(["Enter your TARGETED CLUB CODE."])
-        print_block(["Example: bcaf9533 or #bcaf9533."])
-        club = input("  Club code: ").strip()
-        if not club:
-            log("No club code provided. Please provide a club code to proceed.", "error", show_time=False)
-            continue
-    
-        if not club.startswith("#"):
-            club = "#" + club
-    
+        club = prompt_club()
+
         log("Preparing bot...", "info", show_time=False)
     
         bot = LudoBot(
