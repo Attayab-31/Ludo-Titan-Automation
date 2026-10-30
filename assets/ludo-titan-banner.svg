@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 360" role="img" aria-labelledby="title description">
+  <title id="title">Ludo Titan Automation</title>
+  <desc id="description">A dark navy to green banner with a stylized Ludo board motif and the subtitle ADB-powered Ludo automation for LDPlayer.</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#11131a"/>
+      <stop offset="1" stop-color="#103d27"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#8de0a6"/>
+      <stop offset="1" stop-color="#d2f5dc"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="360" rx="24" fill="url(#background)"/>
+  <g opacity=".16" fill="none" stroke="#b7edc8" stroke-width="2">
+    <path d="M640 0v360M760 0v360M880 0v360M1000 0v360M1120 0v360M600 60h600M600 180h600M600 300h600"/>
+    <path d="M600 60h120v120H600zM840 180h120v120H840zM1080 60h120v120h-120z"/>
+  </g>
+  <g transform="translate(900 180)">
+    <circle r="104" fill="#121820" fill-opacity=".8" stroke="#a8dfb8" stroke-opacity=".55" stroke-width="2"/>
+    <path d="M0-92 92 0 0 92-92 0Z" fill="#1b3428" stroke="#a8dfb8" stroke-opacity=".7" stroke-width="2"/>
+    <path d="M0-92V0h92ZM92 0H0v92ZM0 92V0h-92ZM-92 0H0v-92Z" fill="#d5eadc" fill-opacity=".18"/>
+    <circle cx="-45" cy="-45" r="16" fill="#e66c62"/>
+    <circle cx="45" cy="-45" r="16" fill="#f1bf55"/>
+    <circle cx="45" cy="45" r="16" fill="#68b7ed"/>
+    <circle cx="-45" cy="45" r="16" fill="#8bd48f"/>
+    <circle r="19" fill="url(#accent)"/>
+    <path d="m-7 0 5 5 10-12" fill="none" stroke="#123322" stroke-linecap="round" stroke-linejoin="round" stroke-width="4"/>
+  </g>
+  <text x="80" y="151" fill="#f2f7f3" font-family="Segoe UI, Arial, sans-serif" font-size="58" font-weight="700" letter-spacing="-.8">Ludo Titan</text>
+  <text x="80" y="211" fill="url(#accent)" font-family="Segoe UI, Arial, sans-serif" font-size="38" font-weight="600">Automation</text>
+  <path d="M82 241h74" stroke="#8de0a6" stroke-linecap="round" stroke-width="4"/>
+  <text x="80" y="285" fill="#c7d6cd" font-family="Segoe UI, Arial, sans-serif" font-size="21">ADB-powered Ludo automation for LDPlayer</text>
+</svg>

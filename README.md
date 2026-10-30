@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/ludo-titan-banner.svg" alt="Ludo Titan Automation — ADB-powered Ludo automation for LDPlayer" width="100%"></p>
+
 <div align="center">
 
 # Ludo Titan Automation
